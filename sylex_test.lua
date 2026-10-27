@@ -437,6 +437,10 @@ local function attachCommon(obj, root, p, kind)
 		local function updateTier(isPremium)
 			lockReasons.premium = (not isPremium) and tostring(p.PremiumReason or "Premium only") or nil
 			refreshLock()
+			-- when Premium ends mid-session, switch Premium toggles off so their features stop
+			if not isPremium and kind == "Toggle" and obj.Get and obj:Get() == true then
+				obj:Set(false)
+			end
 		end
 		table.insert(tierListeners, updateTier)
 		table.insert(cleanups, function()
@@ -1982,10 +1986,28 @@ function Library:Window(p)
 		Library:SetPremium(p.Premium)
 	end
 	-- PremiumCheck = url: ask the tier server in the background; Premium elements unlock when it answers
+	-- PremiumRefresh: seconds between re-checks while the script runs (default 60, false to check once)
 	if type(p.PremiumCheck) == "string" then
 		Library._premiumUrl = p.PremiumCheck
+		local interval = p.PremiumRefresh == false and nil or math.max(tonumber(p.PremiumRefresh) or 60, 15)
 		task.spawn(function()
 			Library:CheckPremium(p.PremiumCheck)
+			while interval and not Library.Unloaded do
+				task.wait(interval)
+				if Library.Unloaded then
+					break
+				end
+				local was = Library.Premium
+				Library:CheckPremium()
+				if was ~= Library.Premium then
+					Library:Notify({
+						Title = Library.Premium and "Premium unlocked" or "Premium ended",
+						Desc = Library.Premium and "Premium features are now available." or "Premium features have been turned off.",
+						Type = Library.Premium and "Success" or "Warning",
+						Time = 5,
+					})
+				end
+			end
 		end)
 	end
 

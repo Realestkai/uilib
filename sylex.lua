@@ -1576,7 +1576,8 @@ function Library:Window(p)
 
 	local Title = p.Title or 'null'
 	local Desc = p.Desc or ''
-	local Icon = p.Icon or 'sylex'
+	-- The title always shows the Sylex logo; p.Icon is ignored
+	local Icon = 'sylex'
 	local Theme = themes[p.Theme] and p.Theme or 'Dark'
 	local Keybind = p.Config.Keybind or Enum.KeyCode.LeftControl
 	local Size = p.Config.Size or UDim2.new(0, 530,0, 400)
@@ -6487,14 +6488,8 @@ function Library:Window(p)
 
 			CloseUIShadow.Size = UDim2.new(0, Title_1.TextBounds.X + 40,0, 40)
 
-			-- Show the Sylex logo (or CloseUIButton.Image) instead of text; Image = false keeps the text
-			local LogoImage = CloseUI.Image
-			if LogoImage == nil and CloseUI.Enabled then
-				LogoImage = loadLogo()
-			end
-			if tonumber(LogoImage) then
-				LogoImage = "rbxassetid://" .. tostring(LogoImage)
-			end
+			-- Always show the Sylex logo; the text is only a fallback when the logo can't load
+			local LogoImage = CloseUI.Enabled and loadLogo() or nil
 			local Logo
 			if type(LogoImage) == "string" and LogoImage ~= "" then
 				Title_1.Visible = false

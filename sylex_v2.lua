@@ -1576,7 +1576,7 @@ function Library:Window(p)
 
 	local Title = p.Title or 'null'
 	local Desc = p.Desc or ''
-	local Icon = p.Icon or 'door-open'
+	local Icon = p.Icon or 'sylex'
 	local Theme = themes[p.Theme] and p.Theme or 'Dark'
 	local Keybind = p.Config.Keybind or Enum.KeyCode.LeftControl
 	local Size = p.Config.Size or UDim2.new(0, 530,0, 400)
@@ -1856,9 +1856,20 @@ function Library:Window(p)
 	Icon_1.BorderColor3 = Color3.fromRGB(0,0,0)
 	Icon_1.BorderSizePixel = 0
 	Icon_1.Size = UDim2.new(0, 30,0, 30)
-	Icon_1.Image = gl(Icon).Image
-	Icon_1.ImageRectSize = gl(Icon).ImageRectSize
-	Icon_1.ImageRectOffset = gl(Icon).ImageRectPosition
+	-- "sylex" (the default) shows the Sylex logo; falls back to a plain icon if it can't load
+	local LogoAsset = Icon == "sylex" and loadLogo() or nil
+	if LogoAsset then
+		Icon_1.Image = LogoAsset
+		Icon_1.ScaleType = Enum.ScaleType.Fit
+		Icon_1.Size = UDim2.new(0, 26,0, 26)
+	else
+		if Icon == "sylex" then
+			Icon = 'door-open'
+		end
+		Icon_1.Image = gl(Icon).Image
+		Icon_1.ImageRectSize = gl(Icon).ImageRectSize
+		Icon_1.ImageRectOffset = gl(Icon).ImageRectPosition
+	end
 
 	addToTheme('Text & Icon', Icon_1)
 
@@ -6487,6 +6498,7 @@ function Library:Window(p)
 			local Logo
 			if type(LogoImage) == "string" and LogoImage ~= "" then
 				Title_1.Visible = false
+				FrameCloseUI_1.Visible = false
 				Logo = Instance.new("ImageLabel")
 				Logo.Name = "Logo"
 				Logo.Parent = BackgroundCloseUI_1

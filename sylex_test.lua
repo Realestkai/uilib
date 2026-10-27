@@ -216,6 +216,9 @@ function Library:GetTier()
 end
 
 local function getJson(url)
+	-- a unique value per request: some executors cache HttpGet by URL and would return an old answer
+	local sep = string.find(url, "?", 1, true) and "&" or "?"
+	url = url .. sep .. "_=" .. tostring(math.floor(os.clock() * 1000)) .. tostring(math.random(1000, 9999))
 	local ok, body = pcall(game.HttpGet, game, url)
 	if not ok then
 		return nil, tostring(body)

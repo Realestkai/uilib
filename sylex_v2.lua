@@ -107,6 +107,28 @@ local function readFile(path)
 	return ok2 and data or nil
 end
 
+-- The Sylex logo for the open button: downloaded once, cached, loaded with getcustomasset
+local LOGO_URL = "https://raw.githubusercontent.com/Realestkai/uilib/refs/heads/main/assets/sylex-logo.png"
+local LOGO_PATH = "Sylex/assets/sylex-logo.png"
+local function loadLogo()
+	local getasset = getcustomasset or getsynasset
+	if type(getasset) ~= "function" or not hasFiles then
+		return nil
+	end
+	local data = readFile(LOGO_PATH)
+	if not data or data:sub(2, 4) ~= "PNG" then
+		local ok, body = pcall(game.HttpGet, game, LOGO_URL)
+		if not ok or type(body) ~= "string" or body:sub(2, 4) ~= "PNG" then
+			return nil
+		end
+		if not writeFile(LOGO_PATH, body) then
+			return nil
+		end
+	end
+	local ok, id = pcall(getasset, LOGO_PATH)
+	return ok and type(id) == "string" and id or nil
+end
+
 local function setFlag(flag, value)
 	if not flag then
 		return
@@ -179,85 +201,71 @@ local function attachCommon(obj, root, p, kind)
 	return obj
 end
 
-local themes = {
-	index = {'Dark', 'Midnight'},
-	Midnight = {
-		['Shadow'] = Color3.fromRGB(5, 6, 14),
-		['Background'] = Color3.fromRGB(16, 22, 52),
-		['Background Gradient'] = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 28, 68)), ColorSequenceKeypoint.new(1, Color3.fromRGB(6, 7, 12))},
-		['Page'] = Color3.fromRGB(10, 12, 26),
-		['Main'] = Color3.fromRGB(72, 104, 214),
-		['Text & Icon'] = Color3.fromRGB(235, 238, 255),
+-- Builds a full theme from a small palette, so every theme stays consistent
+local function makeTheme(c)
+	local function on()
+		return { ['Toggle Background'] = c.AccentDim, ['Toggle Value'] = c.Accent }
+	end
+	local function off()
+		return { ['Toggle Background'] = c.Input, ['Toggle Value'] = c.Hover }
+	end
+	local function field()
+		return { ['Background'] = c.Element, ['Value Background'] = c.Page, ['Value Stroke'] = c.Text }
+	end
+	local dropdown = field()
+	dropdown['Dropdown Select'] = { ['Background'] = c.Page, ['Search'] = c.Input, ['Item Background'] = c.Hover }
+	local slider = field()
+	slider['Slider Bar'] = c.AccentDim
+	slider['Slider Bar Value'] = c.Accent
+	slider['Circle Value'] = Color3.fromRGB(255, 255, 255)
+	local keybind = field()
+	keybind['True'] = on()
+	keybind['False'] = off()
+	return {
+		['Shadow'] = c.Shadow,
+		['Background'] = c.Background,
+		['Background Gradient'] = ColorSequence.new(c.Background),
+		['Page'] = c.Page,
+		['Main'] = c.Accent,
+		['Text & Icon'] = c.Text,
 		['Function'] = {
-			['Toggle'] = {
-				['Background'] = Color3.fromRGB(18, 24, 50),
-				['True'] = {
-					['Toggle Background'] = Color3.fromRGB(30, 46, 110),
-					['Toggle Value'] = Color3.fromRGB(72, 104, 214),
-				},
-				['False'] = {
-					['Toggle Background'] = Color3.fromRGB(22, 26, 48),
-					['Toggle Value'] = Color3.fromRGB(40, 46, 78),
-				}
-			},
-			['Label'] = {
-				['Background'] = Color3.fromRGB(18, 24, 50),
-			},
-			['Dropdown'] = {
-				['Background'] = Color3.fromRGB(18, 24, 50),
-				['Value Background'] = Color3.fromRGB(10, 12, 26),
-				['Value Stroke'] = Color3.fromRGB(235, 238, 255),
-				['Dropdown Select'] = {
-					['Background'] = Color3.fromRGB(10, 12, 26),
-					['Search'] = Color3.fromRGB(22, 28, 56),
-					['Item Background'] = Color3.fromRGB(28, 34, 66),
-				}
-			},
-			['Slider'] = {
-				['Background'] = Color3.fromRGB(18, 24, 50),
-				['Value Background'] = Color3.fromRGB(10, 12, 26),
-				['Value Stroke'] = Color3.fromRGB(235, 238, 255),
-				['Slider Bar'] = Color3.fromRGB(30, 46, 110),
-				['Slider Bar Value'] = Color3.fromRGB(72, 104, 214),
-				['Circle Value'] = Color3.fromRGB(255, 255, 255)
-			},
+			['Toggle'] = { ['Background'] = c.Element, ['True'] = on(), ['False'] = off() },
+			['Label'] = { ['Background'] = c.Element },
+			['Dropdown'] = dropdown,
+			['Slider'] = slider,
 			['Code'] = {
-				['Background'] = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 24, 50)), ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 24, 50))},
-				['Background Code'] = Color3.fromRGB(28, 36, 72),
-				['Background Code Value'] = Color3.fromRGB(20, 26, 54),
-				['ScrollingFrame Code'] = Color3.fromRGB(120, 150, 240)
+				['Background'] = ColorSequence.new(c.Element),
+				['Background Code'] = c.Hover,
+				['Background Code Value'] = c.Input,
+				['ScrollingFrame Code'] = c.Accent:Lerp(c.Text, 0.35),
 			},
-			['Button'] = {
-				['Background'] = Color3.fromRGB(18, 24, 50),
-				['Click'] = Color3.fromRGB(235, 238, 255)
-			},
-			['Textbox'] = {
-				['Background'] = Color3.fromRGB(18, 24, 50),
-				['Value Background'] = Color3.fromRGB(10, 12, 26),
-				['Value Stroke'] = Color3.fromRGB(235, 238, 255),
-			},
-			['Keybind'] = {
-				['Background'] = Color3.fromRGB(18, 24, 50),
-				['Value Background'] = Color3.fromRGB(10, 12, 26),
-				['Value Stroke'] = Color3.fromRGB(235, 238, 255),
-				['True'] = {
-					['Toggle Background'] = Color3.fromRGB(30, 46, 110),
-					['Toggle Value'] = Color3.fromRGB(72, 104, 214),
-				},
-				['False'] = {
-					['Toggle Background'] = Color3.fromRGB(22, 26, 48),
-					['Toggle Value'] = Color3.fromRGB(40, 46, 78),
-				}
-			},
+			['Button'] = { ['Background'] = c.Element, ['Click'] = c.Text },
+			['Textbox'] = field(),
+			['Keybind'] = keybind,
 			['Color Picker'] = {
-				['Background'] = Color3.fromRGB(18, 24, 50),
-				['Color Select'] = {
-					['Background'] = Color3.fromRGB(10, 12, 26),
-					['UIStroke'] = Color3.fromRGB(235, 238, 255),
-				}
-			}
-		}
-	},
+				['Background'] = c.Element,
+				['Color Select'] = { ['Background'] = c.Page, ['UIStroke'] = c.Text },
+			},
+		},
+	}
+end
+
+local rgb = Color3.fromRGB
+local palettes = {
+	-- name, shadow, background, page, element, input, hover, accent, accent dim, text
+	{'Midnight', rgb(4, 6, 14), rgb(12, 17, 40), rgb(8, 11, 27), rgb(16, 22, 50), rgb(20, 26, 56), rgb(30, 38, 76), rgb(72, 104, 214), rgb(30, 46, 110), rgb(235, 238, 255)},
+	{'Onyx', rgb(0, 0, 0), rgb(10, 10, 10), rgb(5, 5, 5), rgb(17, 17, 17), rgb(21, 21, 21), rgb(36, 36, 36), rgb(205, 205, 205), rgb(62, 62, 62), rgb(240, 240, 240)},
+	{'Slate', rgb(10, 12, 16), rgb(24, 28, 36), rgb(17, 20, 26), rgb(30, 35, 45), rgb(36, 41, 52), rgb(50, 57, 72), rgb(122, 152, 194), rgb(52, 64, 84), rgb(225, 230, 240)},
+	{'Ocean', rgb(3, 10, 14), rgb(10, 24, 34), rgb(6, 16, 24), rgb(14, 32, 44), rgb(18, 38, 52), rgb(28, 52, 70), rgb(40, 170, 200), rgb(18, 74, 92), rgb(225, 245, 250)},
+	{'Emerald', rgb(4, 10, 8), rgb(12, 26, 20), rgb(7, 17, 13), rgb(16, 34, 26), rgb(20, 40, 31), rgb(30, 56, 44), rgb(46, 190, 120), rgb(22, 82, 54), rgb(225, 245, 235)},
+	{'Crimson', rgb(12, 4, 5), rgb(30, 12, 14), rgb(20, 7, 9), rgb(40, 16, 19), rgb(46, 20, 23), rgb(66, 30, 34), rgb(214, 58, 72), rgb(96, 28, 34), rgb(250, 232, 234)},
+	{'Rose', rgb(12, 6, 10), rgb(32, 16, 26), rgb(21, 10, 17), rgb(42, 21, 34), rgb(48, 25, 39), rgb(68, 36, 55), rgb(236, 110, 160), rgb(104, 46, 72), rgb(252, 234, 242)},
+	{'Amber', rgb(12, 8, 3), rgb(30, 22, 10), rgb(20, 14, 6), rgb(40, 29, 14), rgb(46, 34, 17), rgb(66, 49, 25), rgb(236, 160, 48), rgb(104, 70, 22), rgb(252, 242, 226)},
+	{'Mocha', rgb(12, 9, 8), rgb(30, 24, 22), rgb(21, 16, 15), rgb(40, 32, 29), rgb(46, 37, 34), rgb(64, 52, 47), rgb(196, 150, 112), rgb(88, 66, 50), rgb(240, 230, 222)},
+}
+
+local themes = {
+	index = {'Midnight', 'Dark'},
 	Dark = {
 		['Shadow'] = Color3.fromRGB(15, 15, 15),
 		['Background'] = Color3.fromRGB(20, 20, 20),
@@ -336,6 +344,17 @@ local themes = {
 		}
 	},
 }
+
+for _, c in ipairs(palettes) do
+	local name = c[1]
+	themes[name] = makeTheme({
+		Shadow = c[2], Background = c[3], Page = c[4], Element = c[5], Input = c[6],
+		Hover = c[7], Accent = c[8], AccentDim = c[9], Text = c[10],
+	})
+	if not table.find(themes.index, name) then
+		table.insert(themes.index, name)
+	end
+end
 
 local GUI_NAME = "Sylex"
 local env = (type(getgenv) == "function" and getgenv()) or _G
@@ -1807,6 +1826,8 @@ function Library:Window(p)
 	DropdownValue_1.Position = UDim2.new(1, 0,0.5, 0)
 	DropdownValue_1.Size = UDim2.new(0, 120,0, 20)
 	DropdownValue_1.Transparency = 1
+	-- The theme is picked from the settings tab; this hidden dropdown still drives Window:SetTheme
+	DropdownValue_1.Visible = false
 
 	Td_1.Name = "Td"
 	Td_1.Parent = Topbar_1
@@ -6455,13 +6476,44 @@ function Library:Window(p)
 
 			CloseUIShadow.Size = UDim2.new(0, Title_1.TextBounds.X + 40,0, 40)
 
+			-- Show the Sylex logo (or CloseUIButton.Image) instead of text; Image = false keeps the text
+			local LogoImage = CloseUI.Image
+			if LogoImage == nil and CloseUI.Enabled then
+				LogoImage = loadLogo()
+			end
+			if tonumber(LogoImage) then
+				LogoImage = "rbxassetid://" .. tostring(LogoImage)
+			end
+			local Logo
+			if type(LogoImage) == "string" and LogoImage ~= "" then
+				Title_1.Visible = false
+				Logo = Instance.new("ImageLabel")
+				Logo.Name = "Logo"
+				Logo.Parent = BackgroundCloseUI_1
+				Logo.AnchorPoint = Vector2.new(0.5, 0.5)
+				Logo.BackgroundTransparency = 1
+				Logo.Position = UDim2.new(0.5, 0, 0.5, -1)
+				Logo.Size = UDim2.new(0, 26, 0, 26)
+				Logo.Image = LogoImage
+				Logo.ScaleType = Enum.ScaleType.Fit
+				UICornerCloseUI_1.CornerRadius = UDim.new(0, 10)
+				CloseUIShadow.Size = UDim2.new(0, 50, 0, 50)
+			end
+
 			local Click = click(CloseUIShadow)
 			lak(Click, CloseUIShadow)
 			Click.MouseButton1Click:Connect(function()
-				tw({v = Title_1, t = 0.15, s = Enum.EasingStyle.Back, d = "Out", g = {TextSize = Title_1.TextSize - 2}}):Play()
-				delay(.06, function()
-					tw({v = Title_1, t = 0.15, s = Enum.EasingStyle.Back, d = "Out", g = {TextSize = 12}}):Play()
-				end)
+				if Logo then
+					tw({v = Logo, t = 0.15, s = Enum.EasingStyle.Back, d = "Out", g = {Size = UDim2.new(0, 22, 0, 22)}}):Play()
+					delay(.06, function()
+						tw({v = Logo, t = 0.15, s = Enum.EasingStyle.Back, d = "Out", g = {Size = UDim2.new(0, 26, 0, 26)}}):Play()
+					end)
+				else
+					tw({v = Title_1, t = 0.15, s = Enum.EasingStyle.Back, d = "Out", g = {TextSize = Title_1.TextSize - 2}}):Play()
+					delay(.06, function()
+						tw({v = Title_1, t = 0.15, s = Enum.EasingStyle.Back, d = "Out", g = {TextSize = 12}}):Play()
+					end)
+				end
 				task.spawn(closeui)
 			end)
 		end

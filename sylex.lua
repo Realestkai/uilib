@@ -15,6 +15,8 @@ local connections = {}
 local unloadCallbacks = {}
 local popups = {}
 local keybindRegistry = {}
+local flagListeners = {}
+local tierListeners = {}
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -26,8 +28,44 @@ local LocalPlayer = Players.LocalPlayer
 
 local addToTheme, getColorFromPath, gl, tw, changecanvas, gs, jc, jcf, lak, click, background, addDropdownSelect, addTooltip
 
+-- Debug mode: Library:SetDebug(true) prints flag changes, config activity, locks and full error tracebacks
+local function describe(v)
+	if type(v) == "table" then
+		local ok, json = pcall(function()
+			return game:GetService("HttpService"):JSONEncode(v)
+		end)
+		return ok and json or tostring(v)
+	end
+	return tostring(v)
+end
+
+local function debugLog(...)
+	if Library.Debug then
+		local parts = {}
+		for i = 1, select("#", ...) do
+			parts[i] = describe((select(i, ...)))
+		end
+		print("[Sylex debug] " .. table.concat(parts, " "))
+	end
+end
+
+function Library:SetDebug(enabled)
+	self.Debug = enabled == true
+	print("[Sylex] debug mode " .. (self.Debug and "on" or "off"))
+end
+
 local function safeCall(fn, ...)
 	if Library.Unloaded or type(fn) ~= "function" then
+		return
+	end
+	if Library.Debug then
+		local args = table.pack(...)
+		local ok, err = xpcall(function()
+			return fn(table.unpack(args, 1, args.n))
+		end, debug.traceback)
+		if not ok then
+			warn("[Sylex] callback error: " .. tostring(err))
+		end
 		return
 	end
 	local ok, err = pcall(fn, ...)
@@ -134,9 +172,116 @@ local function setFlag(flag, value)
 		return
 	end
 	Library.Flags[flag] = value
+	debugLog("flag", flag, "=", value)
 	if Library._autosave then
 		Library._autosave()
 	end
+	for _, fn in ipairs(flagListeners[flag] or {}) do
+		safeCall(fn, value)
+	end
+end
+
+-- Runs fn(value) whenever the flag changes; returns a function that stops listening
+function Library:OnFlagChanged(flag, fn)
+	flagListeners[flag] = flagListeners[flag] or {}
+	table.insert(flagListeners[flag], fn)
+	return function()
+		local list = flagListeners[flag]
+		local i = list and table.find(list, fn)
+		if i then
+			table.remove(list, i)
+		end
+	end
+end
+
+--// Freemium / Premium
+
+Library.Premium = false
+
+-- Premium = true unlocks every element made with Premium = true and updates the profile card
+function Library:SetPremium(enabled)
+	self.Premium = enabled == true
+	debugLog("tier =", self.Premium and "Premium" or "Freemium")
+	for _, fn in ipairs(tierListeners) do
+		safeCall(fn, self.Premium)
+	end
+end
+
+-- Runs fn(isPremium) whenever the tier is set; returns a function that stops listening
+function Library:OnPremiumChanged(fn)
+	local last = nil
+	local function listener(isPremium)
+		if isPremium ~= last then
+			last = isPremium
+			fn(isPremium)
+		end
+	end
+	table.insert(tierListeners, listener)
+	return function()
+		local i = table.find(tierListeners, listener)
+		if i then
+			table.remove(tierListeners, i)
+		end
+	end
+end
+
+function Library:IsPremium()
+	return self.Premium == true
+end
+
+function Library:GetTier()
+	return self.Premium and "Premium" or "Freemium"
+end
+
+local function getJson(url)
+	-- a unique value per request: some executors cache HttpGet by URL and would return an old answer
+	local sep = string.find(url, "?", 1, true) and "&" or "?"
+	url = url .. sep .. "_=" .. tostring(math.floor(os.clock() * 1000)) .. tostring(math.random(1000, 9999))
+	local ok, body = pcall(game.HttpGet, game, url)
+	if not ok then
+		return nil, tostring(body)
+	end
+	local decoded, data = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(body)
+	end)
+	if not decoded or type(data) ~= "table" then
+		return nil, "the server didn't return JSON"
+	end
+	return data
+end
+
+-- Asks a tier server (the Sylex Premium worker) whether this player is Premium.
+-- GET <url>?userId=<id> returns { "premium": bool, "linked": bool }. Yields; returns the tier.
+function Library:CheckPremium(url)
+	url = url or self._premiumUrl
+	if type(url) ~= "string" then
+		return self.Premium
+	end
+	self._premiumUrl = url
+	local sep = string.find(url, "?", 1, true) and "&" or "?"
+	local data, err = getJson(url .. sep .. "userId=" .. tostring(LocalPlayer.UserId))
+	if not data then
+		debugLog("premium check failed:", err)
+		return self.Premium
+	end
+	self.Linked = data.linked == true
+	self:SetPremium(data.premium == true)
+	return self.Premium
+end
+
+-- Gets a one-time code the player sends to the Sylex bot with /link <code>. Yields.
+-- Returns the code, or nil and an error message.
+function Library:GetLinkCode()
+	if type(self._premiumUrl) ~= "string" then
+		return nil, "PremiumCheck isn't set on the window"
+	end
+	local base = self._premiumUrl:gsub("%?.*$", ""):gsub("/tier/?$", "")
+	local data, err = getJson(base .. "/link/start?userId=" .. tostring(LocalPlayer.UserId))
+	if not data or type(data.code) ~= "string" then
+		debugLog("getting a link code failed:", err or data)
+		return nil, "Couldn't reach the server. Try again in a moment."
+	end
+	return data.code
 end
 
 local function onTheme(fn)
@@ -159,6 +304,7 @@ end
 local function applyVisibility(root)
 	-- while a tab search is active, collapsed sections are searched too
 	root.Visible = not root:GetAttribute("SylexHidden")
+		and not root:GetAttribute("SylexDependency")
 		and not root:GetAttribute("SylexFiltered")
 		and (root:GetAttribute("SylexSearching") or not root:GetAttribute("SylexCollapsed"))
 end
@@ -189,14 +335,183 @@ local function attachCommon(obj, root, p, kind)
 		end
 	end
 	if p.Flag then
+		if Library.Options[p.Flag] then
+			warn("[Sylex] two elements use the flag '" .. tostring(p.Flag) .. "'; the newer one replaces the older in configs")
+		end
 		obj.Flag = p.Flag
 		Library.Options[p.Flag] = obj
 		if obj.Get then
 			Library.Flags[p.Flag] = obj:Get()
+			for _, fn in ipairs(flagListeners[p.Flag] or {}) do
+				safeCall(fn, Library.Flags[p.Flag])
+			end
 		end
 	end
 	if p.Tooltip and addTooltip then
 		addTooltip(root, p.Tooltip)
+	end
+
+	-- Locking: an element can be locked by its Premium tier, by code (Lock) or by DependsOn.
+	-- A locked element is greyed out, ignores clicks and shows the reason; Premium wins over the others.
+	local lockReasons = {}
+	local lockOrder = { "premium", "manual", "dependency" }
+	local lockOverlay, lockLabel, lockIcon
+	local cleanups = {}
+
+	local function setIcon(name)
+		local icon = gl(name)
+		lockIcon.Image = icon.Image
+		lockIcon.ImageRectSize = icon.ImageRectSize or Vector2.zero
+		lockIcon.ImageRectOffset = icon.ImageRectPosition or Vector2.zero
+	end
+
+	local function buildOverlay()
+		lockOverlay = Instance.new("TextButton")
+		lockOverlay.Name = "SylexLock"
+		lockOverlay.AutoButtonColor = false
+		lockOverlay.Text = ""
+		lockOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
+		lockOverlay.BackgroundTransparency = 0.45
+		lockOverlay.BorderSizePixel = 0
+		lockOverlay.Size = UDim2.new(1, 0, 1, 0)
+		lockOverlay.ZIndex = 20
+		Instance.new("UICorner").Parent = lockOverlay
+
+		lockIcon = Instance.new("ImageLabel")
+		lockIcon.BackgroundTransparency = 1
+		lockIcon.AnchorPoint = Vector2.new(1, 0.5)
+		lockIcon.Position = UDim2.new(1, -12, 0.5, 0)
+		lockIcon.Size = UDim2.new(0, 14, 0, 14)
+		lockIcon.ZIndex = 21
+		lockIcon.Parent = lockOverlay
+
+		lockLabel = Instance.new("TextLabel")
+		lockLabel.BackgroundTransparency = 1
+		lockLabel.AnchorPoint = Vector2.new(1, 0.5)
+		lockLabel.Position = UDim2.new(1, -32, 0.5, 0)
+		lockLabel.Size = UDim2.new(0.6, 0, 1, 0)
+		lockLabel.Font = Enum.Font.GothamBold
+		lockLabel.TextSize = 11
+		lockLabel.TextXAlignment = Enum.TextXAlignment.Right
+		lockLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		lockLabel.ZIndex = 21
+		lockLabel.Parent = lockOverlay
+
+		lockOverlay.Parent = root
+	end
+
+	local function refreshLock()
+		local source
+		for _, s in ipairs(lockOrder) do
+			if lockReasons[s] then
+				source = s
+				break
+			end
+		end
+		local wasLocked = obj.Locked
+		obj.Locked = source ~= nil
+		obj.LockedBy = source
+		if source then
+			if not lockOverlay then
+				buildOverlay()
+			end
+			local premium = source == "premium"
+			local color = premium and Color3.fromRGB(255, 196, 64) or Color3.new(1, 1, 1)
+			setIcon(premium and "crown" or "lock")
+			lockIcon.ImageColor3 = color
+			lockLabel.TextColor3 = color
+			lockLabel.Text = lockReasons[source]
+			lockOverlay.Visible = true
+		elseif lockOverlay then
+			lockOverlay.Visible = false
+		end
+		if wasLocked ~= obj.Locked then
+			debugLog(kind, tostring(p.Title or p.Flag or ""), obj.Locked and ("locked (" .. source .. ")") or "unlocked")
+		end
+	end
+
+	function obj:Lock(reason)
+		lockReasons.manual = tostring(reason or "Locked")
+		refreshLock()
+	end
+
+	-- Unlock only removes a Lock() from code; Premium and DependsOn locks stay until their condition is met
+	function obj:Unlock()
+		lockReasons.manual = nil
+		refreshLock()
+	end
+
+	function obj:IsLocked()
+		return obj.Locked == true
+	end
+
+	if p.Locked then
+		obj:Lock(p.LockReason)
+	end
+
+	-- Premium = true: locked for Freemium users
+	if p.Premium then
+		obj.Premium = true
+		local function updateTier(isPremium)
+			lockReasons.premium = (not isPremium) and tostring(p.PremiumReason or "Premium only") or nil
+			refreshLock()
+			-- when Premium ends mid-session, switch Premium toggles off so their features stop
+			if not isPremium and kind == "Toggle" and obj.Get and obj:Get() == true then
+				obj:Set(false)
+			end
+		end
+		table.insert(tierListeners, updateTier)
+		table.insert(cleanups, function()
+			local i = table.find(tierListeners, updateTier)
+			if i then
+				table.remove(tierListeners, i)
+			end
+		end)
+		updateTier(Library.Premium)
+	end
+
+	-- DependsOn: only show (or unlock) this element while another flag has the right value
+	if p.DependsOn then
+		local dep = type(p.DependsOn) == "table" and p.DependsOn or { Flag = p.DependsOn }
+		local function met(v)
+			if type(dep.Value) == "function" then
+				return dep.Value(v) == true
+			elseif dep.Value ~= nil then
+				return v == dep.Value
+			elseif type(v) == "table" then
+				return next(v) ~= nil
+			end
+			return v ~= nil and v ~= false and v ~= ""
+		end
+		local function update(v)
+			local ok = met(v)
+			if dep.Lock then
+				lockReasons.dependency = (not ok) and tostring(dep.Reason or ("Requires " .. tostring(dep.Flag))) or nil
+				refreshLock()
+			else
+				root:SetAttribute("SylexDependency", not ok)
+				applyVisibility(root)
+			end
+		end
+		table.insert(cleanups, Library:OnFlagChanged(dep.Flag, update))
+		update(Library.Flags[dep.Flag])
+		task.delay(2, function()
+			if Library.Options[dep.Flag] == nil and not Library.Unloaded then
+				debugLog("warning:", tostring(p.Title or kind), "depends on flag", dep.Flag, "but no element has that flag")
+			end
+		end)
+	end
+
+	if #cleanups > 0 then
+		local prev = obj._cleanup
+		obj._cleanup = function()
+			for _, fn in ipairs(cleanups) do
+				pcall(fn)
+			end
+			if prev then
+				prev()
+			end
+		end
 	end
 	return obj
 end
@@ -450,9 +765,9 @@ function Library:Notify(p)
 	end
 end
 
-function Library:SaveConfig(name)
+local function collectConfig()
 	local data = {}
-	for flag, obj in pairs(self.Options) do
+	for flag, obj in pairs(Library.Options) do
 		if obj.Get and not obj.NoSave then
 			local ok, value = pcall(serializeOption, obj)
 			if ok then
@@ -460,8 +775,109 @@ function Library:SaveConfig(name)
 			end
 		end
 	end
+	return data
+end
+
+local function applyConfig(data)
+	Library._loading = true
+	for flag, value in pairs(data) do
+		local obj = Library.Options[flag]
+		-- a Freemium user can't switch on Premium features by loading someone else's config
+		if obj and obj.Set and obj.LockedBy ~= "premium" then
+			pcall(obj.Set, obj, value)
+		end
+	end
+	Library._loading = false
+end
+
+function Library:SaveConfig(name)
 	self._autosaveArmed = true
-	return writeFile(configPath(name), HttpService:JSONEncode(data))
+	debugLog("save config", configPath(name))
+	return writeFile(configPath(name), HttpService:JSONEncode(collectConfig()))
+end
+
+-- Config codes: the current settings as one line of text players can share
+local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local CODE_PREFIX = "SYLEX1:"
+
+local function base64Encode(s)
+	local out = {}
+	for i = 1, #s, 3 do
+		local a, b, c = s:byte(i, i + 2)
+		local n = a * 65536 + (b or 0) * 256 + (c or 0)
+		local chunk = {}
+		for j = 3, 0, -1 do
+			local idx = math.floor(n / 64 ^ j) % 64 + 1
+			table.insert(chunk, B64:sub(idx, idx))
+		end
+		if not b then
+			chunk[3], chunk[4] = "=", "="
+		elseif not c then
+			chunk[4] = "="
+		end
+		table.insert(out, table.concat(chunk))
+	end
+	return table.concat(out)
+end
+
+local function base64Decode(s)
+	s = s:gsub("[^%w%+/=]", "")
+	if #s % 4 ~= 0 then
+		return nil
+	end
+	local out = {}
+	for i = 1, #s, 4 do
+		local n, pad = 0, 0
+		for j = 0, 3 do
+			local ch = s:sub(i + j, i + j)
+			local idx
+			if ch == "=" then
+				pad = pad + 1
+				idx = 1
+			else
+				idx = B64:find(ch, 1, true)
+			end
+			if not idx then
+				return nil
+			end
+			n = n * 64 + (idx - 1)
+		end
+		local bytes = string.char(math.floor(n / 65536) % 256, math.floor(n / 256) % 256, n % 256)
+		table.insert(out, bytes:sub(1, 3 - pad))
+	end
+	return table.concat(out)
+end
+
+-- Returns the code and copies it to the clipboard when the executor allows it
+function Library:ExportConfig()
+	local code = CODE_PREFIX .. base64Encode(HttpService:JSONEncode(collectConfig()))
+	if type(setclipboard) == "function" then
+		pcall(setclipboard, code)
+	elseif type(toclipboard) == "function" then
+		pcall(toclipboard, code)
+	end
+	debugLog("export config,", #code, "characters")
+	return code
+end
+
+function Library:ImportConfig(code)
+	code = tostring(code or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	if code:sub(1, #CODE_PREFIX) ~= CODE_PREFIX then
+		debugLog("import config failed: missing " .. CODE_PREFIX .. " prefix")
+		return false
+	end
+	local json = base64Decode(code:sub(#CODE_PREFIX + 1))
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(json)
+	end)
+	if not json or not ok or type(data) ~= "table" then
+		debugLog("import config failed: code is damaged")
+		return false
+	end
+	self._autosaveArmed = true
+	applyConfig(data)
+	debugLog("import config ok")
+	return true
 end
 
 function Library:LoadConfig(name)
@@ -479,16 +895,11 @@ function Library:LoadConfig(name)
 		return HttpService:JSONDecode(raw)
 	end)
 	if not ok or type(data) ~= "table" then
+		debugLog("load config failed: invalid JSON in", configPath(name))
 		return false
 	end
-	self._loading = true
-	for flag, value in pairs(data) do
-		local obj = self.Options[flag]
-		if obj and obj.Set then
-			pcall(obj.Set, obj, value)
-		end
-	end
-	self._loading = false
+	debugLog("load config", configPath(name))
+	applyConfig(data)
 	return true
 end
 
@@ -1586,6 +1997,38 @@ function Library:Window(p)
 	local SaveState = p.SaveWindowState ~= false
 	local ConfigSaving = p.ConfigSaving or {}
 
+	if p.Debug then
+		Library:SetDebug(true)
+	end
+	if p.Premium ~= nil then
+		Library:SetPremium(p.Premium)
+	end
+	-- PremiumCheck = url: ask the tier server in the background; Premium elements unlock when it answers
+	-- PremiumRefresh: seconds between re-checks while the script runs (default 30, false to check once)
+	if type(p.PremiumCheck) == "string" then
+		Library._premiumUrl = p.PremiumCheck
+		local interval = p.PremiumRefresh == false and nil or math.max(tonumber(p.PremiumRefresh) or 30, 15)
+		task.spawn(function()
+			Library:CheckPremium(p.PremiumCheck)
+			while interval and not Library.Unloaded do
+				task.wait(interval)
+				if Library.Unloaded then
+					break
+				end
+				local was = Library.Premium
+				Library:CheckPremium()
+				if was ~= Library.Premium then
+					Library:Notify({
+						Title = Library.Premium and "Premium unlocked" or "Premium ended",
+						Desc = Library.Premium and "Premium features are now available." or "Premium features have been turned off.",
+						Type = Library.Premium and "Success" or "Warning",
+						Time = 5,
+					})
+				end
+			end
+		end)
+	end
+
 	if ConfigSaving.Folder then
 		Library.ConfigFolder = tostring(ConfigSaving.Folder)
 	end
@@ -2017,6 +2460,96 @@ function Library:Window(p)
 	UIPadding_17.PaddingTop = UDim.new(0,45)
 
 	changecanvas(ScrollingFrame_2, UIListLayout_10, 5)
+
+	local openLinkDialog -- set once the window's Dialog exists (Tabs:LinkDiscord)
+
+	-- Profile card at the bottom of the sidebar: avatar, display name and tier
+	if p.Profile ~= false then
+		ScrollingFrame_2.Size = UDim2.new(1, 0, 1, -50)
+
+		local Card = Instance.new("Frame")
+		Card.Name = "Profile"
+		Card.AnchorPoint = Vector2.new(0, 1)
+		Card.Position = UDim2.new(0, 2, 1, 0)
+		Card.Size = UDim2.new(1, -6, 0, 44)
+		Card.BackgroundColor3 = themes[Theme].Function.Label.Background
+		Card.BorderSizePixel = 0
+		Card.Parent = Frame_6
+		Instance.new("UICorner", Card).CornerRadius = UDim.new(0, 8)
+		addToTheme('Function.Label.Background', Card)
+
+		local Avatar = Instance.new("ImageLabel")
+		Avatar.Name = "Avatar"
+		Avatar.AnchorPoint = Vector2.new(0, 0.5)
+		Avatar.Position = UDim2.new(0, 7, 0.5, 0)
+		Avatar.Size = UDim2.new(0, 28, 0, 28)
+		Avatar.BackgroundColor3 = themes[Theme].Page
+		Avatar.BorderSizePixel = 0
+		Avatar.Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(LocalPlayer.UserId) .. "&w=150&h=150"
+		Avatar.Parent = Card
+		Instance.new("UICorner", Avatar).CornerRadius = UDim.new(1, 0)
+		-- background only: addToTheme would tint the headshot image itself
+		onTheme(function()
+			Avatar.BackgroundColor3 = themes[IsTheme].Page
+		end)
+
+		local Name = Instance.new("TextLabel")
+		Name.Name = "DisplayName"
+		Name.BackgroundTransparency = 1
+		Name.Position = UDim2.new(0, 41, 0, 8)
+		Name.Size = UDim2.new(1, -46, 0, 14)
+		Name.Font = Enum.Font.GothamBold
+		Name.Text = LocalPlayer.DisplayName
+		Name.TextColor3 = themes[Theme]['Text & Icon']
+		Name.TextSize = 11
+		Name.TextXAlignment = Enum.TextXAlignment.Left
+		Name.TextTruncate = Enum.TextTruncate.AtEnd
+		Name.Parent = Card
+		addToTheme('Text & Icon', Name)
+
+		local Tier = Instance.new("TextLabel")
+		Tier.Name = "Tier"
+		Tier.BackgroundTransparency = 1
+		Tier.Position = UDim2.new(0, 41, 0, 23)
+		Tier.Size = UDim2.new(1, -46, 0, 12)
+		Tier.Font = Enum.Font.GothamBold
+		Tier.TextSize = 10
+		Tier.TextXAlignment = Enum.TextXAlignment.Left
+		Tier.Parent = Card
+
+		local function updateTier()
+			if Library.Premium then
+				Tier.Text = "Premium"
+				Tier.TextColor3 = Color3.fromRGB(255, 196, 64)
+				Tier.TextTransparency = 0
+			elseif Library._premiumUrl and Library.Linked == false then
+				-- PremiumCheck is on but this Roblox account isn't linked to Discord yet
+				Tier.Text = "Link Discord"
+				Tier.TextColor3 = themes[IsTheme].Main
+				Tier.TextTransparency = 0
+			else
+				Tier.Text = "Freemium"
+				Tier.TextColor3 = themes[IsTheme]['Text & Icon']
+				Tier.TextTransparency = 0.5
+			end
+		end
+		table.insert(tierListeners, updateTier)
+		onTheme(updateTier)
+		updateTier()
+
+		-- clicking the card opens the Link Discord dialog when PremiumCheck is set
+		local CardClick = Instance.new("TextButton")
+		CardClick.BackgroundTransparency = 1
+		CardClick.Text = ""
+		CardClick.Size = UDim2.new(1, 0, 1, 0)
+		CardClick.ZIndex = 5
+		CardClick.Parent = Card
+		CardClick.MouseButton1Click:Connect(function()
+			if Library._premiumUrl and openLinkDialog then
+				openLinkDialog()
+			end
+		end)
+	end
 
 	local Tabs = {
 		Value = false,
@@ -3900,9 +4433,16 @@ function Library:Window(p)
 				end)
 			end
 
+			local New = {}
+
 			U.InputBegan:Connect(function(input, gameProcessed)
 				-- ignore presses while typing in chat or a textbox
 				if gameProcessed or U:GetFocusedTextBox() then
+					return
+				end
+				-- a locked or dependency-hidden keybind ignores its key
+				local root = Keybind.Parent
+				if New.Locked or (root and root:GetAttribute("SylexDependency")) then
 					return
 				end
 				if input.KeyCode == Key and not changeing then
@@ -3918,7 +4458,6 @@ function Library:Window(p)
 
 			F.MouseButton1Click:Connect(changeKey)
 
-			local New = {}
 			local entry = {
 				Title = p.Title or 'null',
 				Get = function()
@@ -6016,6 +6555,48 @@ function Library:Window(p)
 			end
 		end
 
+		-- Shows a one-time code to send to the Sylex bot with /link, then re-checks the tier
+		function Tabs:LinkDiscord()
+			task.spawn(function()
+				local code, err = Library:GetLinkCode()
+				if not code then
+					Tabs:Notify({ Title = "Couldn't get a link code", Desc = err, Type = "Error", Time = 4 })
+					return
+				end
+				local command = "/link " .. code
+				local copied = false
+				if type(setclipboard) == "function" then
+					copied = pcall(setclipboard, command)
+				elseif type(toclipboard) == "function" then
+					copied = pcall(toclipboard, command)
+				end
+				Tabs:Dialog({
+					Title = "Link your Discord",
+					Content = "In our Discord server, send:\n<b>" .. command .. "</b>\n"
+						.. (copied and "It's copied to your clipboard. " or "")
+						.. "The code works for 10 minutes.",
+					Buttons = {
+						{ Title = "I've linked it", Color = Color3.fromRGB(0, 188, 0), Callback = function()
+							task.spawn(function()
+								Library:CheckPremium()
+								if Library.Premium then
+									Tabs:Notify({ Title = "Premium unlocked", Type = "Success", Time = 4 })
+								elseif Library.Linked then
+									Tabs:Notify({ Title = "Linked", Desc = "You're on Freemium.", Type = "Info", Time = 4 })
+								else
+									Tabs:Notify({ Title = "Not linked yet", Desc = "Send the command in Discord, then try again.", Type = "Warning", Time = 4 })
+								end
+							end)
+						end },
+						{ Title = "Later" },
+					},
+				})
+			end)
+		end
+		openLinkDialog = function()
+			Tabs:LinkDiscord()
+		end
+
 		function Tabs:GetTheme()
 			return IsTheme
 		end
@@ -6392,6 +6973,66 @@ function Library:Window(p)
 					end,
 				})
 			end
+
+			if Library._premiumUrl then
+				Settings:Section({ Title = "Premium" })
+
+				Settings:Button({
+					Title = "Link Discord",
+					Desc = "Get Premium from your Discord role",
+					Callback = function()
+						Tabs:LinkDiscord()
+					end,
+				})
+
+				Settings:Button({
+					Title = "Check Premium Again",
+					Callback = function()
+						task.spawn(function()
+							Library:CheckPremium()
+							Tabs:Notify({ Title = "You're on " .. Library:GetTier(), Type = Library.Premium and "Success" or "Info", Time = 3 })
+						end)
+					end,
+				})
+			end
+
+			Settings:Section({ Title = "Share" })
+
+			Settings:Button({
+				Title = "Copy Config Code",
+				Desc = "Copies your current settings as one line of text",
+				Callback = function()
+					Library:ExportConfig()
+					local copied = type(setclipboard) == "function" or type(toclipboard) == "function"
+					Tabs:Notify({
+						Title = copied and "Config code copied" or "Clipboard not supported",
+						Desc = copied and "Send it to a friend so they can import it." or "",
+						Type = copied and "Success" or "Warning",
+						Time = 3,
+					})
+				end,
+			})
+
+			Settings:Button({
+				Title = "Import Config Code",
+				Desc = "Paste a code someone shared with you",
+				Callback = function()
+					Tabs:Dialog({
+						Title = "Import config code",
+						Input = { Placeholder = "SYLEX1:..." },
+						Buttons = {
+							{ Title = "Import", Color = Color3.fromRGB(0, 188, 0), Callback = function(code)
+								if Library:ImportConfig(code) then
+									Tabs:Notify({ Title = "Config imported", Type = "Success", Time = 3 })
+								else
+									Tabs:Notify({ Title = "That code isn't valid", Type = "Error", Time = 3 })
+								end
+							end },
+							{ Title = "Cancel" },
+						},
+					})
+				end,
+			})
 
 			Settings:Section({ Title = "Other" })
 

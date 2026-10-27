@@ -215,6 +215,27 @@ function Library:GetTier()
 	return self.Premium and "Premium" or "Freemium"
 end
 
+-- Asks a tier server (e.g. the Sylex Premium worker) whether this player is Premium.
+-- Expects GET <url>?userId=<id> to return { "premium": true/false }. Yields; returns the result.
+function Library:CheckPremium(url)
+	local userId = game:GetService("Players").LocalPlayer.UserId
+	local sep = string.find(url, "?", 1, true) and "&" or "?"
+	local ok, body = pcall(game.HttpGet, game, url .. sep .. "userId=" .. tostring(userId))
+	if not ok then
+		debugLog("premium check failed:", body)
+		return self.Premium
+	end
+	local decoded, data = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(body)
+	end)
+	if not decoded or type(data) ~= "table" then
+		debugLog("premium check returned something that isn't JSON")
+		return self.Premium
+	end
+	self:SetPremium(data.premium == true)
+	return self.Premium
+end
+
 local function onTheme(fn)
 	table.insert(themeListeners, fn)
 end
@@ -1929,6 +1950,12 @@ function Library:Window(p)
 	end
 	if p.Premium ~= nil then
 		Library:SetPremium(p.Premium)
+	end
+	-- PremiumCheck = url: ask the tier server in the background; Premium elements unlock when it answers
+	if type(p.PremiumCheck) == "string" then
+		task.spawn(function()
+			Library:CheckPremium(p.PremiumCheck)
+		end)
 	end
 
 	if ConfigSaving.Folder then

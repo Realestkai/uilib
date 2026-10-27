@@ -215,25 +215,52 @@ function Library:GetTier()
 	return self.Premium and "Premium" or "Freemium"
 end
 
--- Asks a tier server (e.g. the Sylex Premium worker) whether this player is Premium.
--- Expects GET <url>?userId=<id> to return { "premium": true/false }. Yields; returns the result.
-function Library:CheckPremium(url)
-	local userId = game:GetService("Players").LocalPlayer.UserId
-	local sep = string.find(url, "?", 1, true) and "&" or "?"
-	local ok, body = pcall(game.HttpGet, game, url .. sep .. "userId=" .. tostring(userId))
+local function getJson(url)
+	local ok, body = pcall(game.HttpGet, game, url)
 	if not ok then
-		debugLog("premium check failed:", body)
-		return self.Premium
+		return nil, tostring(body)
 	end
 	local decoded, data = pcall(function()
 		return game:GetService("HttpService"):JSONDecode(body)
 	end)
 	if not decoded or type(data) ~= "table" then
-		debugLog("premium check returned something that isn't JSON")
+		return nil, "the server didn't return JSON"
+	end
+	return data
+end
+
+-- Asks a tier server (the Sylex Premium worker) whether this player is Premium.
+-- GET <url>?userId=<id> returns { "premium": bool, "linked": bool }. Yields; returns the tier.
+function Library:CheckPremium(url)
+	url = url or self._premiumUrl
+	if type(url) ~= "string" then
 		return self.Premium
 	end
+	self._premiumUrl = url
+	local sep = string.find(url, "?", 1, true) and "&" or "?"
+	local data, err = getJson(url .. sep .. "userId=" .. tostring(LocalPlayer.UserId))
+	if not data then
+		debugLog("premium check failed:", err)
+		return self.Premium
+	end
+	self.Linked = data.linked == true
 	self:SetPremium(data.premium == true)
 	return self.Premium
+end
+
+-- Gets a one-time code the player sends to the Sylex bot with /link <code>. Yields.
+-- Returns the code, or nil and an error message.
+function Library:GetLinkCode()
+	if type(self._premiumUrl) ~= "string" then
+		return nil, "PremiumCheck isn't set on the window"
+	end
+	local base = self._premiumUrl:gsub("%?.*$", ""):gsub("/tier/?$", "")
+	local data, err = getJson(base .. "/link/start?userId=" .. tostring(LocalPlayer.UserId))
+	if not data or type(data.code) ~= "string" then
+		debugLog("getting a link code failed:", err or data)
+		return nil, "Couldn't reach the server. Try again in a moment."
+	end
+	return data.code
 end
 
 local function onTheme(fn)
@@ -1953,6 +1980,7 @@ function Library:Window(p)
 	end
 	-- PremiumCheck = url: ask the tier server in the background; Premium elements unlock when it answers
 	if type(p.PremiumCheck) == "string" then
+		Library._premiumUrl = p.PremiumCheck
 		task.spawn(function()
 			Library:CheckPremium(p.PremiumCheck)
 		end)
@@ -2390,6 +2418,8 @@ function Library:Window(p)
 
 	changecanvas(ScrollingFrame_2, UIListLayout_10, 5)
 
+	local openLinkDialog -- set once the window's Dialog exists (Tabs:LinkDiscord)
+
 	-- Profile card at the bottom of the sidebar: avatar, display name and tier
 	if p.Profile ~= false then
 		ScrollingFrame_2.Size = UDim2.new(1, 0, 1, -50)
@@ -2449,6 +2479,11 @@ function Library:Window(p)
 				Tier.Text = "Premium"
 				Tier.TextColor3 = Color3.fromRGB(255, 196, 64)
 				Tier.TextTransparency = 0
+			elseif Library._premiumUrl and Library.Linked == false then
+				-- PremiumCheck is on but this Roblox account isn't linked to Discord yet
+				Tier.Text = "Link Discord"
+				Tier.TextColor3 = themes[IsTheme].Main
+				Tier.TextTransparency = 0
 			else
 				Tier.Text = "Freemium"
 				Tier.TextColor3 = themes[IsTheme]['Text & Icon']
@@ -2458,6 +2493,19 @@ function Library:Window(p)
 		table.insert(tierListeners, updateTier)
 		onTheme(updateTier)
 		updateTier()
+
+		-- clicking the card opens the Link Discord dialog when PremiumCheck is set
+		local CardClick = Instance.new("TextButton")
+		CardClick.BackgroundTransparency = 1
+		CardClick.Text = ""
+		CardClick.Size = UDim2.new(1, 0, 1, 0)
+		CardClick.ZIndex = 5
+		CardClick.Parent = Card
+		CardClick.MouseButton1Click:Connect(function()
+			if Library._premiumUrl and openLinkDialog then
+				openLinkDialog()
+			end
+		end)
 	end
 
 	local Tabs = {
@@ -6464,6 +6512,48 @@ function Library:Window(p)
 			end
 		end
 
+		-- Shows a one-time code to send to the Sylex bot with /link, then re-checks the tier
+		function Tabs:LinkDiscord()
+			task.spawn(function()
+				local code, err = Library:GetLinkCode()
+				if not code then
+					Tabs:Notify({ Title = "Couldn't get a link code", Desc = err, Type = "Error", Time = 4 })
+					return
+				end
+				local command = "/link " .. code
+				local copied = false
+				if type(setclipboard) == "function" then
+					copied = pcall(setclipboard, command)
+				elseif type(toclipboard) == "function" then
+					copied = pcall(toclipboard, command)
+				end
+				Tabs:Dialog({
+					Title = "Link your Discord",
+					Content = "In our Discord server, send:\n<b>" .. command .. "</b>\n"
+						.. (copied and "It's copied to your clipboard. " or "")
+						.. "The code works for 10 minutes.",
+					Buttons = {
+						{ Title = "I've linked it", Color = Color3.fromRGB(0, 188, 0), Callback = function()
+							task.spawn(function()
+								Library:CheckPremium()
+								if Library.Premium then
+									Tabs:Notify({ Title = "Premium unlocked", Type = "Success", Time = 4 })
+								elseif Library.Linked then
+									Tabs:Notify({ Title = "Linked", Desc = "You're on Freemium.", Type = "Info", Time = 4 })
+								else
+									Tabs:Notify({ Title = "Not linked yet", Desc = "Send the command in Discord, then try again.", Type = "Warning", Time = 4 })
+								end
+							end)
+						end },
+						{ Title = "Later" },
+					},
+				})
+			end)
+		end
+		openLinkDialog = function()
+			Tabs:LinkDiscord()
+		end
+
 		function Tabs:GetTheme()
 			return IsTheme
 		end
@@ -6837,6 +6927,28 @@ function Library:Window(p)
 								{ Title = "Cancel" },
 							},
 						})
+					end,
+				})
+			end
+
+			if Library._premiumUrl then
+				Settings:Section({ Title = "Premium" })
+
+				Settings:Button({
+					Title = "Link Discord",
+					Desc = "Get Premium from your Discord role",
+					Callback = function()
+						Tabs:LinkDiscord()
+					end,
+				})
+
+				Settings:Button({
+					Title = "Check Premium Again",
+					Callback = function()
+						task.spawn(function()
+							Library:CheckPremium()
+							Tabs:Notify({ Title = "You're on " .. Library:GetTier(), Type = Library.Premium and "Success" or "Info", Time = 3 })
+						end)
 					end,
 				})
 			end
